@@ -1,16 +1,21 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from app.api.v1.insights import router as insights_router
 from app.api.v1.admin import router as admin_router
+from app.api.v1.chat import router as chat_router
+from app.api.v1.advisor import router as advisor_router
 from app.core.database import mongodb
 from app.services.summary_service import refresh_all_summaries
 import structlog
 import logging
 import time
 import uuid
+import os
 
 # ---------------------------------------------------------------------------
 # Logging setup
@@ -106,6 +111,11 @@ app.add_middleware(RequestLoggingMiddleware)
 
 app.include_router(insights_router, prefix="/api/v1")
 app.include_router(admin_router, prefix="/api/v1")
+app.include_router(chat_router, prefix="/api/v1")
+app.include_router(advisor_router, prefix="/api/v1")
+
+_static_dir = os.path.join(os.path.dirname(__file__), "static")
+app.mount("/ui", StaticFiles(directory=_static_dir, html=True), name="frontend")
 
 
 @app.get("/", tags=["Health"])
@@ -113,8 +123,10 @@ def read_root():
     return {
         "message": "GenAdvisorIQ API",
         "version": "1.0.0",
+        "ui": "GET /ui/GenAdvisorIQ.html",
         "endpoints": {
             "ask": "POST /api/v1/insights/ask",
+            "chat": "POST /api/v1/chat/complete",
             "customer": "GET /api/v1/admin/customers/{customer_id}",
             "usage": "GET /api/v1/admin/usage",
             "health": "GET /api/v1/admin/health",
