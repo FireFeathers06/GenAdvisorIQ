@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark" data-density="dense">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>GenAdvisorIQ</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+<div id="root"></div>
+
+<!-- Claude API polyfill — proxies through FastAPI instead of calling Anthropic directly -->
+<script>
+window.claude = {
+  async complete({ messages }) {
+    const resp = await fetch('/api/v1/chat/complete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages })
+    });
+    if (!resp.ok) throw new Error('GenAdvisorIQ API error ' + resp.status);
+    const data = await resp.json();
+    return data.content;
+  }
+};
+</script>
+
+<script src="https://cdn.jsdelivr.net/npm/marked@15/marked.min.js"></script>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+<script type="text/babel" src="tweaks-panel.jsx"></script>
+<script type="text/babel" src="charts.jsx"></script>
+<script type="text/babel" src="data.jsx"></script>
+<script type="text/babel" src="advisor-data.jsx"></script>
+<script type="text/babel" src="cards.jsx"></script>
+<script type="text/babel" src="companion.jsx"></script>
+<script type="text/babel" src="book.jsx"></script>
+
+<script type="text/babel">
+const { useState, useEffect, useRef } = React;
+
+const ACCENT_INK = { "#c2f04a": "#16240a", "#6d8cff": "#0a1230", "#a98bff": "#1c1340", "#ff8a4c": "#2a0f04" };
+
+const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
+  "layout": "worklist",
+  "accent": "#a98bff",
+  "dark": true,
+  "density": "dense"
+}/*EDITMODE-END*/;
+
+const NAV = [
+  { group: "Overview", items: [
+    { id: "book",          label: "Book",             icon: "grid"    },
+    { id: "clients",       label: "Clients",           icon: "user"    },
+    { id: "opportunities", label: "Opportunities",     icon: "target", dot: true },
+  ]},
+  { group: "Practice", items: [
+    { id: "copilot", label: "Copilot",        icon: "sparkle" },
+    { id: "tasks",   label: "Tasks & reviews", icon: "check"   },
+    { id: "reports", label: "Reports",         icon: "chart"   },
+  ]},
+];
+const TITLES = { book: "Book of business", clients: "All clients", opportunities: "Opportunities", copilot: "AI Copilot", tasks: "Tasks & reviews", reports: "Reports" };
+
+/* ---- Advisor sidebar ---- */
+function Rail({ active, setActive, advisorInfo }) {
+  const info = advisorInfo || {};
+  const displayName = info.name || "Advisor";
+  const displayInitials = info.initials || displayName.split(" ").map(s => s[0]).slice(0, 2).join("").toUpperCase() || "A";
+  const displayTitle = (info.title || "Wealth Advisor").split("·")[0].trim();
+
+  return (
+    <nav className="rail">
+      <div className="brand">
+        <div className="brand-mark">G</div>
+        <div className="brand-name"><b>GenAdvisor</b><span>IQ</span></div>
+      </div>
+      {NAV.map(g => (
+        <div key={g.group}>
+          <div className="nav-group-label">{g.group}</div>
+          {g.items.map(it => (
+            <div key={it.id} className={"nav-item" + (active === it.id ? " active" : "")} onClick={() => setActive(it.id)}>
+              <Icon name={it.icon} size={17} className="nav-ico" />
+              <span className="txt">{it.label}</span>
+              {it.dot && <span className="badge-dot" />}
+            </div>
+          ))}
+        </div>
+      ))}
+      <div className="rail-foot">
+        <div className="user-chip">
+          <div className="avatar">{displayInitials}</div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div className="u-name">{displayName}</div>
+            <div className="u-sub">{displayTitle}</div>
+          </div>
+          <Icon name="gear" size={16} style={{ color: "var(--ink-3)" }} className="label-hide" />
+        </div>
+      </div>
+    </nav>
+  );
+}
+
+/* ---- Opportunities view ---- */
+function OpportunitiesView({ clients, onOpen, ask }) {
+  const opps = [...(clients || [])].filter(c => c.opp && c.opp.value > 0).sort((a, b) => b.opp.value - a.opp.value);
+  const total = opps.reduce((s, c) => s + c.opp.value, 0);
+  return (
+    <div className="scroll" style={{ height: "100%" }}>
+      <div className="stack" style={{ maxWidth: 920, margin: "0 auto" }}>
+        <div className="briefing">
+          <div className="eyebrow">Open pipeline</div>
+          <div className="metric metric-xl tnum" style={{ marginTop: 6 }}>{fmtAum(total)}</div>
+          <div className="muted" style={{ marginTop: 6 }}>{opps.length} actionable opportunities across your book · sorted by value</div>
+        </div>
+        {opps.length === 0 && (
+          <div className="card" style={{ textAlign: "center", padding: 32, color: "var(--ink-3)" }}>
+            No high-value opportunities flagged yet.
+          </div>
+        )}
+        {opps.length > 0 && (
+          <div className="card flush">
+            {opps.map(c => (
+              <div key={c.id} className="row between" style={{ padding: "14px 18px", borderTop: "1px solid var(--line-2)", cursor: "pointer" }} onClick={() => onOpen(c)}>
+                <span className="row" style={{ gap: 12 }}>
+                  <span className="lrow-ico accent"><Icon name="target" size={16} /></span>
+                  <span>
+                    <span className="t" style={{ fontSize: 13.5, fontWeight: 600 }}>{c.opp.label}</span>
+                    <span className="meta" style={{ display: "block", fontSize: 11.5, color: "var(--ink-3)" }}>{c.name} · {c.segment} · {c.opp.type}</span>
+                  </span>
+                </span>
+                <span className="row" style={{ gap: 14 }}>
+                  <span className="mono" style={{ fontWeight: 600, fontSize: 15 }}>{fmtAum(c.opp.value)}</span>
+                  <button className="btn btn-accent" style={{ height: 30 }}
+                          onClick={(e) => { e.stopPropagation(); ask(`Draft outreach to ${c.name} about ${c.opp.label}`); }}>
+                    <Icon name="send" size={13} /> Pursue
+                  </button>
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function EmptyView({ id }) {
+  return (
+    <div className="empty">
+      <div className="e-ico"><Icon name={id === "tasks" ? "check" : "chart"} size={24} /></div>
+      <div>
+        <div style={{ fontSize: 16, fontWeight: 650, color: "var(--ink)" }}>{TITLES[id]}</div>
+        <div style={{ maxWidth: 380, marginTop: 6 }}>Mapped in the GenAdvisorIQ information architecture. Tell me to design this screen next.</div>
+      </div>
+    </div>
+  );
+}
+
+/* ---- Loading screen ---- */
+function LoadingScreen() {
+  return (
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100vh", flexDirection: "column", gap: 16, color: "var(--ink-2)" }}>
+      <div className="ai-orb" style={{ width: 48, height: 48 }}><Icon name="sparkle" size={24} /></div>
+      <div style={{ fontSize: 16, fontWeight: 600 }}>Loading your book…</div>
+      <div className="typing" style={{ transform: "scale(1.2)" }}><i /><i /><i /></div>
+    </div>
+  );
+}
+
+/* ---------------- App ---------------- */
+function App() {
+  const [t, setTweak] = useTweaks(TWEAK_DEFAULTS);
+
+  // Server-state
+  const [bookLoading, setBookLoading] = useState(true);
+  const [bookError, setBookError]     = useState(null);
+  const [advisorInfo, setAdvisorInfo] = useState(null);
+  const [clientsList, setClientsList] = useState([]);
+  const [kpis, setKpis]               = useState({});
+
+  // Client detail state
+  const [activeClient, setActiveClient]     = useState(null); // bookClient record
+  const [clientContext, setClientContext]   = useState(null); // full context from admin API
+  const [contextLoading, setContextLoading] = useState(false);
+
+  const [active, setActive]           = useState("book");
+  const [explainOpen, setExplainOpen] = useState(false);
+  const [cpending, setCPending]       = useState({ text: "", n: 0 });
+
+  // ---- Fetch book on mount ----
+  useEffect(() => {
+    (async () => {
+      try {
+        const res  = await fetch("/api/v1/advisor/book");
+        const json = await res.json();
+        if (json.success && json.data) {
+          const { advisor, kpis: k, clients } = json.data;
+          setAdvisorInfo(advisor);
+          setKpis(k);
+          setClientsList(clients || []);
+          // Expose globals for copilot context
+          window._advisorInfo  = advisor;
+          window._bookClients  = clients || [];
+          window._bookKpis     = k;
+        } else {
+          setBookError("Failed to load book data.");
+        }
+      } catch (e) {
+        setBookError("Network error: " + e.message);
+      } finally {
+        setBookLoading(false);
+      }
+    })();
+  }, []);
+
+  // ---- Theme / accent side-effects ----
+  useEffect(() => {
+    const r = document.documentElement;
+    r.setAttribute("data-theme", t.dark ? "dark" : "light");
+    r.setAttribute("data-density", t.density);
+    const a = t.accent || "#c2f04a";
+    r.style.setProperty("--accent", a);
+    r.style.setProperty("--accent-ink", ACCENT_INK[a] || "#16240a");
+    r.style.setProperty("--accent-strong", `color-mix(in oklab, ${a} 86%, #000)`);
+    r.style.setProperty("--accent-soft", `color-mix(in oklab, ${a} 18%, transparent)`);
+  }, [t.dark, t.accent, t.density]);
+
+  const layout = ["worklist", "table", "cards"].includes(t.layout) ? t.layout : "worklist";
+
+  const copilotAsk = (text) => setCPending(p => ({ text, n: p.n + 1 }));
+  copilotAsk._pending = cpending;
+  copilotAsk._consume = () => setCPending(p => ({ ...p, text: "" }));
+
+  // ---- Open a client: fetch full context ----
+  const openClient = async (c) => {
+    setActiveClient(c);
+    setClientContext(null);
+    setContextLoading(true);
+    window.scrollTo(0, 0);
+    try {
+      const res  = await fetch(`/api/v1/admin/customers/${c.id}`);
+      const json = await res.json();
+      if (json.success && json.data) {
+        setClientContext(json.data);
+      } else {
+        setClientContext({});
+      }
+    } catch (e) {
+      setClientContext({});
+    } finally {
+      setContextLoading(false);
+    }
+  };
+
+  const backToBook = () => {
+    setActiveClient(null);
+    setClientContext(null);
+  };
+
+  const railVisible = activeClient || (active === "book" && layout !== "table") || (active === "clients");
+  const ask = (text) => { copilotAsk(text); if (!railVisible) setActive("copilot"); };
+
+  let title, sub;
+  if (activeClient) {
+    title = activeClient.name;
+    sub   = activeClient.who + " · " + activeClient.segment;
+  } else if (active === "book") {
+    const firstName = (advisorInfo && advisorInfo.name) ? advisorInfo.name.split(" ")[0] : "there";
+    title = "Good morning, " + firstName;
+    sub   = (advisorInfo && advisorInfo.title) || "Wealth Advisor";
+  } else {
+    title = TITLES[active];
+    sub   = null;
+  }
+
+  const tweaks = (
+    <TweaksPanel title="Tweaks">
+      <TweakSection label="Book layout" />
+      <TweakRadio label="View" value={layout}
+                  options={[{ value: "worklist", label: "Worklist" }, { value: "table", label: "Table" }, { value: "cards", label: "Cards" }]}
+                  onChange={v => setTweak("layout", v)} />
+      <TweakSection label="Appearance" />
+      <TweakColor label="Accent" value={t.accent} options={["#c2f04a", "#6d8cff", "#a98bff", "#ff8a4c"]} onChange={v => setTweak("accent", v)} />
+      <TweakToggle label="Dark mode" value={t.dark} onChange={v => setTweak("dark", v)} />
+      <TweakRadio label="Density" value={t.density}
+                  options={[{ value: "comfortable", label: "Comfortable" }, { value: "dense", label: "Dense" }]}
+                  onChange={v => setTweak("density", v)} />
+    </TweaksPanel>
+  );
+
+  if (bookLoading) {
+    return <LoadingScreen />;
+  }
+
+  if (bookError) {
+    return (
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100vh", flexDirection: "column", gap: 12, color: "var(--ink-2)" }}>
+        <Icon name="info" size={28} style={{ color: "var(--warn)" }} />
+        <div style={{ fontSize: 15, fontWeight: 600 }}>Could not load book data</div>
+        <div style={{ fontSize: 13, color: "var(--ink-3)" }}>{bookError}</div>
+        <button className="btn btn-accent" onClick={() => window.location.reload()}>Retry</button>
+      </div>
+    );
+  }
+
+  /* ---- Advisor perspective ---- */
+  return (
+    <div className="app">
+      <Rail
+        active={active}
+        setActive={(id) => { backToBook(); setActive(id); }}
+        advisorInfo={advisorInfo}
+      />
+      <div className="main">
+        <header className="topbar">
+          <div><h1>{title}</h1>{sub && <span className="sub">{sub}</span>}</div>
+          <div className="spacer" />
+          <div className="search hide-narrow"><Icon name="search" size={15} /> Search clients…<kbd>⌘K</kbd></div>
+          <button className="icon-btn has-dot"><Icon name="bell" size={17} /></button>
+          <button className="btn btn-accent" onClick={() => ask(activeClient ? "What should I discuss with " + activeClient.name + "?" : "Who are my top 3 priorities today?")}>
+            <Icon name="sparkle" size={15} /> Ask Copilot
+          </button>
+        </header>
+
+        <div style={{ flex: 1, minHeight: 0, padding: "20px 26px 24px" }}>
+          {activeClient ? (
+            contextLoading ? (
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", color: "var(--ink-3)", fontSize: 14, gap: 10 }}>
+                <span className="typing"><i /><i /><i /></span> Loading client profile…
+              </div>
+            ) : (
+              <ClientDetail
+                bookClient={activeClient}
+                context={clientContext}
+                onBack={backToBook}
+                explain={() => setExplainOpen(true)}
+                copilotAsk={copilotAsk}
+              />
+            )
+          ) : active === "book" ? (
+            <BookView
+              layout={layout}
+              onOpen={openClient}
+              ask={ask}
+              copilotAsk={copilotAsk}
+              clients={clientsList}
+              kpis={kpis}
+            />
+          ) : active === "clients" ? (
+            <div className="grid" style={{ gridTemplateColumns: "minmax(0,1fr) 384px", gridTemplateRows: "minmax(0,1fr)", height: "100%", minHeight: 0 }}>
+              <div className="scroll" style={{ minHeight: 0, height: "100%", paddingRight: 4 }}>
+                <div className="stack">
+                  <BookKPIs kpis={kpis} cols={3} />
+                  <ClientTable clients={clientsList} onOpen={openClient} />
+                </div>
+              </div>
+              <div style={{ height: "100%", minHeight: 0, overflow: "hidden" }}>
+                <AdvisorCopilot pendingAsk={copilotAsk._pending} onConsumeAsk={copilotAsk._consume} />
+              </div>
+            </div>
+          ) : active === "opportunities" ? (
+            <OpportunitiesView clients={clientsList} onOpen={openClient} ask={ask} />
+          ) : active === "copilot" ? (
+            <div style={{ height: "100%", maxWidth: 880, margin: "0 auto" }}>
+              <AdvisorCopilot pendingAsk={copilotAsk._pending} onConsumeAsk={copilotAsk._consume} />
+            </div>
+          ) : (
+            <EmptyView id={active} />
+          )}
+        </div>
+      </div>
+
+      {explainOpen && activeClient && clientContext && (
+        <ExplainModal
+          p={buildPersonaFromContext(
+            Object.assign({}, clientContext, { hs_factors: activeClient.hs_factors, financial_summary: Object.assign({}, clientContext.financial_summary, { health_score: activeClient.health_score }) })
+          )}
+          onClose={() => setExplainOpen(false)}
+          onAsk={copilotAsk}
+        />
+      )}
+      {tweaks}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
