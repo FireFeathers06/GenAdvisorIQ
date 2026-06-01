@@ -1,296 +1,204 @@
-# GenAdvisorIQ - AI Financial Advisor
+# GenAdvisorIQ — AI-Powered Wealth Advisor Platform
 
-A FastAPI-based financial advisor API powered by Claude AI with MongoDB integration for comprehensive customer context, token tracking, and cost monitoring.
+A FastAPI backend and React SPA for wealth management advisors. Advisors get a full book-of-business dashboard with AI-generated health scores, prioritised worklists, and an always-on Claude-powered copilot — all grounded in real MongoDB data.
 
 ## Features
 
-- **AI-Powered Financial Advice**: Personalized recommendations using Claude AI
-- **MongoDB Integration**: Real customer data - agents, customers, assets, liabilities, insurance, goals, etc.
-- **Customer Context**: Pulls complete financial profile from MongoDB for richer advice
-- **Token Tracking**: Monitor input/output tokens per API call
-- **Cost Calculation**: Real-time cost tracking with detailed breakdowns
-- **Usage Analytics**: Track total and daily usage statistics
-- **RESTful API**: Clean, well-documented endpoints
+- **Advisor dashboard** — book-of-business in worklist, table, and card layouts; client detail view with financial cards
+- **AI Copilot** — book-aware and client-aware Claude chat rail; AI briefing band on every view
+- **Health scoring** — 5-factor score (savings rate, debt ratio, goal progress, insurance, emergency fund) computed server-side per client
+- **Full MongoDB integration** — customers, assets, liabilities, insurance, goals, call logs; no hardcoded data anywhere in the UI
+- **Secure AI proxy** — `POST /api/v1/chat/complete` keeps the Anthropic API key server-side; the browser never sees it
+- **Markdown rendering** — all Claude responses render formatted (bold, bullets, headings) in chat bubbles and summary cards
+- **Usage analytics** — per-request token and cost tracking logged to `api_usage` collection
 
 ## Technology Stack
 
-- **Backend**: FastAPI + Uvicorn
-- **AI**: Claude API (Anthropic)
-- **Database**: MongoDB with Motor (async driver)
-- **Data Validation**: Pydantic
-- **Environment**: python-dotenv
+| Layer | Technology |
+|-------|-----------|
+| Backend | FastAPI + Uvicorn |
+| Async DB driver | Motor (MongoDB) |
+| AI | Anthropic Claude API (`AsyncAnthropic`) |
+| Data validation | Pydantic v2 |
+| Frontend | React 18 + Babel standalone (no build step) |
+| Serving static files | FastAPI `StaticFiles` + `aiofiles` |
 
-## Setup
+## Quick Start
 
-### 1. Install Dependencies
+### 1. Install dependencies
 ```bash
-pip install fastapi uvicorn anthropic pymongo motor python-dotenv pydantic
+pip install -r requirements.txt
 ```
 
-### 2. Environment Configuration
-Add your credentials to `.env`:
-```bash
-# Claude API
-CLAUDE_API_KEY=your_claude_api_key_here
+### 2. Configure environment
+Create `.env` at the repo root:
+```env
+# Required
+CLAUDE_API_KEY=your_anthropic_api_key
+MONGODB_URL=mongodb://localhost:27017
+MONGODB_DATABASE=genaibot
+
+# Optional
 CLAUDE_MODEL=claude-3-sonnet-20240229
 CLAUDE_MAX_TOKENS=2000
 CLAUDE_TEMPERATURE=0.7
-
-# MongoDB
-MONGODB_URL=mongodb://localhost:27017
-MONGODB_DATABASE=genaibot
 ```
 
-### 3. MongoDB Database Setup
-Ensure your MongoDB instance is running and contains the following collections:
-- `genaibot.customers` - Customer profiles
-- `genaibot.agents` - Bank advisors
-- `genaibot.Assets` - Customer assets
-- `genaibot.liabilities` - Customer liabilities
-- `genaibot.insurance` - Insurance policies
-- `genaibot.goal` - Financial goals
-- `genaibot.transactions` - Transaction history
-- `genaibot.callLogs` - Customer call logs
-- `genaibot.dependents` - Customer dependents
-- `genaibot.globalVariables` - Global financial parameters
-
-### 4. Run the Application
+### 3. Run the server
 ```bash
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-## API Endpoints
-
-### POST `/api/analyze` - Get Financial Advice
-Get personalized financial advice based on customer profile and question.
-
-**Request Body**:
-```json
-{
-  "customer_id": "507f1f77bcf86cd799439011",
-  "question": "What should be my investment strategy for retirement?"
-}
+### 4. Open the UI
+```
+http://localhost:8000/ui/GenAdvisorIQ.html
 ```
 
-**Response**:
-```json
-{
-  "answer": "Based on your financial profile with monthly income of $75,000 and current net worth of $500,000, here are my recommendations...",
-  "status": "generated",
-  "customer_id": "507f1f77bcf86cd799439011",
-  "context_summary": {
-    "total_assets": 750000,
-    "total_liabilities": 250000,
-    "net_worth": 500000
-  },
-  "metrics": {
-    "model": "claude-3-sonnet-20240229",
-    "input_tokens": 1245,
-    "output_tokens": 580,
-    "total_tokens": 1825,
-    "cost": {
-      "input_cost": 0.003735,
-      "output_cost": 0.0087,
-      "total_cost": 0.012435,
-      "input_rate_per_million": 3.0,
-      "output_rate_per_million": 15.0
-    }
-  }
-}
+Interactive API docs available at `http://localhost:8000/docs`.
+
+## MongoDB Collections
+
+| Collection | Note |
+|-----------|------|
+| `customers` | Primary client profiles |
+| `agents` | Advisor profiles |
+| `Assets` | Capital A — client assets |
+| `liabilities` | lowercase |
+| `insurance` | Insurance policies |
+| `goal` | Singular, not `goals` |
+| `callLogs` | camelCase |
+| `api_usage` | Written by the API on every request |
+
+> Collection names are inconsistent in the source DB — match them exactly when adding queries.
+
+## Architecture
+
+```
+POST /api/analyze          →  app/api/routes.py  →  query_service  →  MongoDB + Claude
+GET  /api/v1/advisor/book  →  app/api/v1/advisor.py  (batch-fetch + health score)
+POST /api/v1/chat/complete →  app/api/v1/chat.py     (Claude proxy)
+GET  /ui/*                 →  app/static/            (React SPA)
 ```
 
-### GET `/api/customer/{customer_id}` - Get Customer Profile
-Fetch complete financial profile for a customer including all relationships.
+### Request flow — `/api/v1/advisor/book`
+1. Fetch all customers from MongoDB
+2. Batch-fetch assets, liabilities, insurance, goals, and call logs in parallel (`asyncio.gather` — 5 queries total regardless of client count)
+3. Compute a 5-factor health score per client (0–100)
+4. Return pre-display fields: `score`, `segment`, `sentiment`, `lastContact`, `opp`, `action`, `hs_factors`
 
-**Example**:
-```bash
-GET /api/customer/507f1f77bcf86cd799439011
+### Request flow — `/ui/GenAdvisorIQ.html`
+1. On mount: `GET /api/v1/advisor/book` → populates worklist and KPI tiles
+2. On client click: `GET /api/v1/admin/customers/{id}` → builds full persona via `buildPersonaFromContext()`
+3. All AI calls: `POST /api/v1/chat/complete` → Claude API (key never in browser)
+
+### Health score factors
+
+| Factor | Weight | Source |
+|--------|--------|--------|
+| Savings rate | 0–30 pts | `(income − expenses) / income`; skipped when expenses unknown |
+| Debt ratio | 0–25 pts | `1 − (total_liabilities / total_assets)` |
+| Goal progress | 0–20 pts | Average `current / target` across all goals |
+| Insurance coverage | 0–15 pts | Any policy with status `Active` / `Inforce` / `In Force` |
+| Emergency fund | 0–10 pts | Liquid assets ÷ monthly expenses; target = 6 months |
+
+### File structure
+
+```
+app/
+├── main.py                        # FastAPI app, routers, StaticFiles mount
+├── api/
+│   ├── routes.py                  # POST /api/analyze (legacy)
+│   └── v1/
+│       ├── admin.py               # GET /api/v1/admin/customers/{id}, usage, health
+│       ├── advisor.py             # GET /api/v1/advisor/book
+│       ├── chat.py                # POST /api/v1/chat/complete (Claude proxy)
+│       └── insights.py           # POST /api/v1/insights/ask
+├── services/
+│   ├── llm_service.py             # AsyncAnthropic wrapper + cost metrics
+│   ├── query_service.py           # Prompt building + Claude call for /api/analyze
+│   ├── database_service.py        # MongoDB queries for /api/analyze context
+│   └── summary_service.py         # Background summary refresh scheduler
+├── models/
+│   ├── api.py                     # success_response / error_response helpers
+│   └── database.py                # Pydantic v2 models (PascalCase aliases for MongoDB)
+└── core/
+    ├── config.py                  # Settings from environment
+    └── database.py                # MongoDB singleton (Motor)
+
+app/static/                        # React SPA (no build step)
+├── GenAdvisorIQ.html              # Entry point; window.claude polyfill
+├── styles.css                     # Design tokens + component styles
+├── data.jsx                       # buildPersonaFromContext(), Markdown renderer
+├── advisor-data.jsx               # askCopilot() grounded in live book context
+├── book.jsx                       # BookView, AdvisorCopilot, ClientDetail
+├── cards.jsx                      # Financial cards (NetWorth, Health, Goals, …)
+├── companion.jsx                  # AICompanion, AIBriefing, ExplainModal
+├── charts.jsx                     # Recharts wrappers (AreaTrend, etc.)
+└── tweaks-panel.jsx               # Dev theme / layout tweaks panel
 ```
 
-**Response**:
+## API Reference
+
+### `GET /api/v1/advisor/book`
+Returns the advisor's full book of business with pre-computed display fields.
+
 ```json
 {
-  "customer": {
-    "first_name": "John",
-    "last_name": "Doe",
-    "email": "john@example.com",
-    "monthly_income": 75000,
-    "monthly_expenses": 50000
-  },
-  "agent": {
-    "username": "agent_john",
-    "first_name": "Jane",
-    "company": "BankCorp"
-  },
-  "financial_summary": {
-    "total_assets": 750000,
-    "total_liabilities": 250000,
-    "net_worth": 500000,
-    "monthly_savings": 25000
-  },
-  "assets": [
+  "advisor": { "name": "Michael Johnson", "initials": "MJ", "title": "Senior Advisor · GEN ADVISOR IQ" },
+  "kpis": { "total_aum": 700000, "client_count": 5, "at_risk_count": 4, "goal_count": 3 },
+  "clients": [
     {
-      "header": "Savings Account",
-      "type": "Cash",
-      "amount": 100000,
-      "firm": "Bank A"
-    }
-  ],
-  "liabilities": [
-    {
-      "header": "Home Loan",
-      "type": "Mortgage",
-      "outstanding_balance": 200000,
-      "interest_rate": 5
-    }
-  ],
-  "insurance": [
-    {
-      "product_name": "Life Insurance",
-      "policy_type": "Term",
-      "sum_assured": 500000,
-      "premium": 5000
-    }
-  ],
-  "goals": [
-    {
-      "name": "Retirement",
-      "goal_type": "Retirement",
-      "goal_amount": 1000000,
-      "goal_year": 2040
-    }
-  ],
-  "dependents": [
-    {
-      "first_name": "Jane",
-      "relation": "Spouse"
+      "id": "...",
+      "name": "Susan Smith",
+      "score": 81,
+      "aum": 700000,
+      "lastContact": 721,
+      "sentiment": "warm",
+      "segment": "Mass affluent",
+      "action": "Urgent: schedule call",
+      "hs_factors": [
+        { "k": "Savings rate", "v": 100 },
+        { "k": "Debt ratio", "v": 77 }
+      ]
     }
   ]
 }
 ```
 
-### GET `/api/usage` - Get Usage Statistics
-Get token usage and cost tracking for all API calls.
+### `POST /api/v1/chat/complete`
+Proxies a message to Claude. Never call Anthropic directly from the browser.
 
-**Response**:
+**Request:**
 ```json
-{
-  "total": {
-    "requests": 150,
-    "tokens": 45000,
-    "cost_usd": 0.225
-  },
-  "today": {
-    "requests": 12,
-    "tokens": 3600,
-    "cost_usd": 0.018
-  },
-  "pricing": {
-    "claude-3-opus-20240229": {"input": 15.0, "output": 75.0},
-    "claude-3-sonnet-20240229": {"input": 3.0, "output": 15.0},
-    "claude-3-haiku-20240307": {"input": 0.25, "output": 1.25}
-  }
-}
+{ "messages": [{ "role": "user", "content": "Summarise this client's risk profile." }] }
 ```
 
-### GET `/api/health` - Health Check
-Check API and MongoDB connection status.
-
-## MongoDB Schema
-
-The application expects the following MongoDB schema structure:
-
-### Collections Overview
-
-1. **customers** - Primary customer data
-   - FirstName, LastName, Email, PhoneNumber
-   - DOB, Gender, Marital Status, Occupation
-   - Earning, Expenses, Addresses
-   - AgentId (references agents)
-
-2. **Assets** - Customer assets
-   - CustomerId, Header, Type
-   - Amount, Firm
-
-3. **liabilities** - Customer debts
-   - CustomerId, Header, Type
-   - OutstandingBalance, EMI, InterestRate
-
-4. **insurance** - Insurance policies
-   - CustomerId, PolicyNumber, ProductName
-   - SumAssured, Premium, Status
-
-5. **goal** - Financial goals
-   - CustomerId, Name, GoalType
-   - GoalAmount, GoalYear, CurrentAmount
-
-6. **transactions** - Transaction history
-   - CustomerId, Amount, Description
-   - TransactionDate, Status
-
-7. **callLogs** - Customer interaction history
-   - CustomerId, CallDate, CallPurpose
-   - CustomerSentiment, Notes
-
-8. **dependents** - Customer family members
-   - CustomerId, FirstName, Relation
-   - DOB, Gender, Earning
-
-9. **agents** - Bank advisors
-   - username, first name, last name
-   - email, phone, company, role
-
-## Architecture
-
-```
-app/
-├── main.py                 # FastAPI app with MongoDB lifecycle
-├── api/
-│   └── routes.py          # API endpoints with usage tracking
-├── services/
-│   ├── llm_service.py     # Claude integration with cost calculation
-│   ├── query_service.py   # Query processing with MongoDB context
-│   └── database_service.py # MongoDB queries & aggregation
-├── models/
-│   ├── query.py           # Request/response models
-│   └── database.py        # Pydantic models for MongoDB collections
-└── core/
-    ├── config.py          # Configuration from environment
-    └── database.py        # MongoDB connection management
+**Response:**
+```json
+{ "content": "...", "input_tokens": 120, "output_tokens": 85 }
 ```
 
-## Cost Tracking
+### `GET /api/v1/admin/customers/{customer_id}`
+Full client context including assets, liabilities, goals, insurance, recent call logs, and a computed financial summary.
 
-Costs are calculated based on Claude's pricing:
+### `POST /api/analyze`
+Legacy endpoint — personalized financial advice for a single customer question.
 
-- **Claude 3 Sonnet**: $3/M input tokens, $15/M output tokens
-- **Claude 3 Opus**: $15/M input tokens, $75/M output tokens  
-- **Claude 3 Haiku**: $0.25/M input tokens, $1.25/M output tokens
+### `GET /api/v1/admin/usage`
+Aggregate token and cost statistics from the `api_usage` collection.
 
-Every API call returns detailed metrics including:
-- Input/output token counts
-- Individual and total costs
-- Pricing rates per model
+## Development Notes
 
-## Development
+**Pydantic aliases:** MongoDB documents use PascalCase and spaced field names (`FirstName`, `Marital Status`). All models in `app/models/database.py` use `Field(alias="...")` with `populate_by_name=True`.
 
-### Requirements
-- Python 3.8+
-- MongoDB 4.0+
-- Claude API key
-- All packages in `requirements.txt`
+**Claude model:** Configured via `CLAUDE_MODEL` env var. If you change the model, also update `CLAUDE_PRICING` in `app/services/llm_service.py` to keep cost calculations accurate.
 
-### Running Tests
-```bash
-pytest tests/ -v
-```
+**Frontend globals:** `book.jsx` sets `window._bookClients`, `window._advisorInfo`, `window._bookKpis` after the book fetch so `askCopilot()` in `advisor-data.jsx` can build a grounded context string without prop-drilling.
 
-### Next Steps for Production
-1. Replace in-memory usage stats with MongoDB storage
-2. Add authentication (JWT tokens)
-3. Implement rate limiting
-4. Add comprehensive logging
-5. Set up monitoring and alerts
-6. Add caching layer (Redis)
-</content>
-<parameter name="filePath">/Users/harshittiwari/Documents/Development/GenAdvisorIQ/README.md
+**Markdown in chat:** The `Markdown` component in `data.jsx` uses `marked` (loaded via CDN) to render Claude responses. It is applied to all AI output surfaces — chat bubbles, briefing bands, and summary cards. Worklist snippets strip markdown before truncating to avoid orphaned `**` tokens.
+
+## Requirements
+
+- Python 3.10+
+- MongoDB 4.4+
+- Anthropic API key
