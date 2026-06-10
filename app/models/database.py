@@ -207,6 +207,7 @@ class ApiUsage(BaseModel):
     endpoint: str
     method: str
     user_id: Optional[PyObjectId] = None  # Customer or Agent ID if applicable
+    advisor_id: Optional[PyObjectId] = None  # Authenticated advisor making the request
     timestamp: str  # ISO format datetime
     status_code: int
     response_time_ms: Optional[float] = None

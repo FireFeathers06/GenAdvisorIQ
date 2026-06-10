@@ -1,9 +1,11 @@
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from app.models.api import success_response, error_response
+from app.core.auth import get_current_advisor
+from app.core.database import mongodb
 from app.services.database_service import DatabaseService
 from app.services.llm_service import CLAUDE_PRICING
 from app.services.summary_service import refresh_customer_summary, refresh_all_summaries
-from app.models.database import ApiUsage
+from app.models.database import Agent, ApiUsage
 from bson.errors import InvalidId
 from bson import ObjectId
 from datetime import datetime
@@ -12,11 +14,22 @@ import time
 
 logger = structlog.get_logger()
 
-router = APIRouter(prefix="/admin", tags=["Admin"])
+router = APIRouter(prefix="/admin", tags=["Admin"],
+                   dependencies=[Depends(get_current_advisor)])
+
+
+async def _owned_by(advisor: Agent, customer_id: str) -> bool:
+    """True if the customer belongs to the authenticated advisor's book."""
+    doc = await mongodb.get_db()["customers"].find_one(
+        {"_id": ObjectId(customer_id), "AgentId": ObjectId(str(advisor.id))},
+        {"_id": 1},
+    )
+    return doc is not None
 
 
 @router.get("/customers/{customer_id}", summary="Get customer financial profile")
-async def get_customer_profile(customer_id: str, request: Request):
+async def get_customer_profile(customer_id: str, request: Request,
+                               advisor: Agent = Depends(get_current_advisor)):
     request_id: str = getattr(request.state, "request_id", None)
     start_time = time.time()
     status_code = 200
@@ -27,6 +40,12 @@ async def get_customer_profile(customer_id: str, request: Request):
         except InvalidId:
             status_code = 400
             raise HTTPException(status_code=400, detail="Invalid customer ID format")
+
+        # Advisors can only access customers in their own book; 404 (not 403)
+        # so customer IDs aren't enumerable across books.
+        if not await _owned_by(advisor, customer_id):
+            status_code = 404
+            raise HTTPException(status_code=404, detail=f"Customer {customer_id} not found")
 
         context = await DatabaseService.get_customer_context(customer_id)
         if "error" in context:
@@ -86,13 +105,18 @@ async def get_usage_stats(request: Request):
 
 
 @router.post("/customers/{customer_id}/refresh-summary", summary="Refresh AI summary for one customer")
-async def refresh_summary(customer_id: str, request: Request):
+async def refresh_summary(customer_id: str, request: Request,
+                          advisor: Agent = Depends(get_current_advisor)):
     """Regenerate the advisor-facing summary for a single customer immediately."""
     request_id: str = getattr(request.state, "request_id", None)
     try:
         ObjectId(customer_id)
     except InvalidId:
         return error_response("INVALID_ID", "Invalid customer ID format", request_id=request_id)
+
+    if not await _owned_by(advisor, customer_id):
+        return error_response("CUSTOMER_NOT_FOUND", f"Customer {customer_id} not found",
+                              request_id=request_id)
 
     ok, metrics = await refresh_customer_summary(customer_id)
     if not ok:

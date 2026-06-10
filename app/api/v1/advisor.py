@@ -1,6 +1,7 @@
 # app/api/v1/advisor.py — advisor book-of-business endpoint
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from app.models.api import success_response, error_response
+from app.core.auth import get_current_advisor
 from app.core.database import mongodb
 from app.models.database import Customer, Agent, Asset, Liability, Insurance, Goal, CallLog
 from bson import ObjectId
@@ -309,37 +310,32 @@ def _build_client_record(
 # ---------------------------------------------------------------------------
 
 @router.get("/book", summary="Advisor book of business")
-async def get_advisor_book(request: Request):
+async def get_advisor_book(request: Request, advisor: Agent = Depends(get_current_advisor)):
     request_id: str = getattr(request.state, "request_id", None)
     try:
         db = mongodb.get_db()
+        agent = advisor
 
-        # Fetch all customers
+        # Fetch only the authenticated advisor's customers
         customers: list[Customer] = []
-        async for doc in db["customers"].find({}):
+        async for doc in db["customers"].find({"AgentId": ObjectId(str(advisor.id))}):
             try:
                 customers.append(Customer(**doc))
             except Exception as e:
                 logger.warning("skip_bad_customer_doc", error=str(e))
 
         if not customers:
+            fn = agent.first_name or ""
+            ln = agent.last_name or ""
             return success_response({
-                "advisor": {"name": "Advisor", "initials": "A", "title": "Wealth Advisor"},
+                "advisor": {
+                    "name": f"{fn} {ln}".strip() or "Advisor",
+                    "initials": (fn[:1] + ln[:1]).upper() or "A",
+                    "title": f"Senior Advisor · {agent.company or 'GenAdvisorIQ'}",
+                },
                 "kpis": {"total_aum": 0, "client_count": 0, "at_risk_count": 0, "goal_count": 0},
                 "clients": [],
             }, request_id=request_id)
-
-        # Pick the agent from the first customer (all customers share one advisor in this demo)
-        agent: Agent | None = None
-        if customers:
-            agent_id = str(customers[0].agent_id) if customers[0].agent_id else None
-            if agent_id:
-                agent_doc = await db["agents"].find_one({"_id": ObjectId(agent_id)})
-                if agent_doc:
-                    try:
-                        agent = Agent(**agent_doc)
-                    except Exception:
-                        pass
 
         object_ids = [c.id for c in customers if c.id]
 

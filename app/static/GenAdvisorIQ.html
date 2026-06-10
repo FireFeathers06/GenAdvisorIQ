@@ -12,15 +12,52 @@
 <body>
 <div id="root"></div>
 
-<!-- Claude API polyfill — proxies through FastAPI instead of calling Anthropic directly -->
+<!-- Auth helper + Claude API polyfill — proxies through FastAPI instead of calling Anthropic directly -->
 <script>
+window._auth = { token: null, advisor: null };
+
+async function _refreshAuth() {
+  try {
+    const r = await fetch('/api/v1/auth/refresh', { method: 'POST' });
+    if (!r.ok) return false;
+    const j = await r.json();
+    if (j.success && j.data && j.data.access_token) {
+      window._auth.token = j.data.access_token;
+      window._auth.advisor = j.data.advisor;
+      return true;
+    }
+  } catch (e) {}
+  return false;
+}
+window._refreshAuth = _refreshAuth;
+
+/* Fetch wrapper: attaches the bearer token, transparently refreshes once on 401 */
+window.authFetch = async function (url, opts = {}) {
+  const doFetch = () => fetch(url, {
+    ...opts,
+    headers: {
+      ...(opts.headers || {}),
+      ...(window._auth.token ? { 'Authorization': 'Bearer ' + window._auth.token } : {}),
+    },
+  });
+  let resp = await doFetch();
+  if (resp.status === 401 && await _refreshAuth()) {
+    resp = await doFetch();
+  }
+  if (resp.status === 401) {
+    window.dispatchEvent(new Event('gaiq:unauthorized'));
+  }
+  return resp;
+};
+
 window.claude = {
   async complete({ messages }) {
-    const resp = await fetch('/api/v1/chat/complete', {
+    const resp = await window.authFetch('/api/v1/chat/complete', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ messages })
     });
+    if (resp.status === 429) throw new Error('Daily AI budget exhausted or rate limited');
     if (!resp.ok) throw new Error('GenAdvisorIQ API error ' + resp.status);
     const data = await resp.json();
     return data.content;
@@ -68,7 +105,7 @@ const NAV = [
 const TITLES = { book: "Book of business", clients: "All clients", opportunities: "Opportunities", copilot: "AI Copilot", tasks: "Tasks & reviews", reports: "Reports" };
 
 /* ---- Advisor sidebar ---- */
-function Rail({ active, setActive, advisorInfo }) {
+function Rail({ active, setActive, advisorInfo, onLogout }) {
   const info = advisorInfo || {};
   const displayName = info.name || "Advisor";
   const displayInitials = info.initials || displayName.split(" ").map(s => s[0]).slice(0, 2).join("").toUpperCase() || "A";
@@ -99,7 +136,10 @@ function Rail({ active, setActive, advisorInfo }) {
             <div className="u-name">{displayName}</div>
             <div className="u-sub">{displayTitle}</div>
           </div>
-          <Icon name="gear" size={16} style={{ color: "var(--ink-3)" }} className="label-hide" />
+          <button className="icon-btn" title="Sign out" onClick={onLogout}
+                  style={{ width: 28, height: 28, flex: "none" }}>
+            <Icon name="x" size={14} />
+          </button>
         </div>
       </div>
     </nav>
@@ -162,6 +202,65 @@ function EmptyView({ id }) {
   );
 }
 
+/* ---- Login screen ---- */
+function LoginScreen({ onSuccess }) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError]       = useState(null);
+  const [busy, setBusy]         = useState(false);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (!username.trim() || !password || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await fetch("/api/v1/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: username.trim(), password }),
+      });
+      if (r.status === 429) { setError("Too many attempts. Try again in a minute."); return; }
+      const j = await r.json();
+      if (j.success && j.data && j.data.access_token) {
+        window._auth.token = j.data.access_token;
+        window._auth.advisor = j.data.advisor;
+        onSuccess();
+      } else {
+        setError((j.error && j.error.message) || "Invalid username or password");
+      }
+    } catch (err) {
+      setError("Network error: " + err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="login-screen">
+      <form className="card login-card" onSubmit={submit}>
+        <div className="row" style={{ gap: 10, marginBottom: 18 }}>
+          <div className="brand-mark">G</div>
+          <div className="brand-name" style={{ fontSize: 18 }}><b>GenAdvisor</b><span>IQ</span></div>
+        </div>
+        <div style={{ fontSize: 15, fontWeight: 650, marginBottom: 4 }}>Advisor sign in</div>
+        <div style={{ fontSize: 12.5, color: "var(--ink-3)", marginBottom: 18 }}>Access your book of business</div>
+        <label className="login-label">Username or email</label>
+        <input className="login-input" type="text" autoFocus autoComplete="username"
+               value={username} onChange={e => setUsername(e.target.value)} />
+        <label className="login-label">Password</label>
+        <input className="login-input" type="password" autoComplete="current-password"
+               value={password} onChange={e => setPassword(e.target.value)} />
+        {error && <div className="login-error"><Icon name="info" size={14} /> {error}</div>}
+        <button className="btn btn-accent" type="submit" disabled={busy || !username.trim() || !password}
+                style={{ width: "100%", justifyContent: "center", marginTop: 16, height: 38 }}>
+          {busy ? "Signing in…" : "Sign in"}
+        </button>
+      </form>
+    </div>
+  );
+}
+
 /* ---- Loading screen ---- */
 function LoadingScreen() {
   return (
@@ -176,6 +275,9 @@ function LoadingScreen() {
 /* ---------------- App ---------------- */
 function App() {
   const [t, setTweak] = useTweaks(TWEAK_DEFAULTS);
+
+  // Auth state: null = checking session, false = needs login, true = authenticated
+  const [authed, setAuthed] = useState(null);
 
   // Server-state
   const [bookLoading, setBookLoading] = useState(true);
@@ -193,11 +295,22 @@ function App() {
   const [explainOpen, setExplainOpen] = useState(false);
   const [cpending, setCPending]       = useState({ text: "", n: 0 });
 
-  // ---- Fetch book on mount ----
+  // ---- Restore session on mount (refresh cookie -> access token) ----
   useEffect(() => {
+    (async () => { setAuthed(await window._refreshAuth()); })();
+    const onUnauthorized = () => setAuthed(false);
+    window.addEventListener("gaiq:unauthorized", onUnauthorized);
+    return () => window.removeEventListener("gaiq:unauthorized", onUnauthorized);
+  }, []);
+
+  // ---- Fetch book once authenticated ----
+  useEffect(() => {
+    if (authed !== true) return;
+    setBookLoading(true);
+    setBookError(null);
     (async () => {
       try {
-        const res  = await fetch("/api/v1/advisor/book");
+        const res  = await window.authFetch("/api/v1/advisor/book");
         const json = await res.json();
         if (json.success && json.data) {
           const { advisor, kpis: k, clients } = json.data;
@@ -217,7 +330,15 @@ function App() {
         setBookLoading(false);
       }
     })();
-  }, []);
+  }, [authed]);
+
+  const logout = async () => {
+    try { await fetch("/api/v1/auth/logout", { method: "POST" }); } catch (e) {}
+    window._auth.token = null;
+    window._auth.advisor = null;
+    setAuthed(false);
+    backToBook();
+  };
 
   // ---- Theme / accent side-effects ----
   useEffect(() => {
@@ -244,7 +365,7 @@ function App() {
     setContextLoading(true);
     window.scrollTo(0, 0);
     try {
-      const res  = await fetch(`/api/v1/admin/customers/${c.id}`);
+      const res  = await window.authFetch(`/api/v1/admin/customers/${c.id}`);
       const json = await res.json();
       if (json.success && json.data) {
         setClientContext(json.data);
@@ -294,6 +415,14 @@ function App() {
     </TweaksPanel>
   );
 
+  if (authed === null) {
+    return <LoadingScreen />;
+  }
+
+  if (authed === false) {
+    return <LoginScreen onSuccess={() => setAuthed(true)} />;
+  }
+
   if (bookLoading) {
     return <LoadingScreen />;
   }
@@ -316,6 +445,7 @@ function App() {
         active={active}
         setActive={(id) => { backToBook(); setActive(id); }}
         advisorInfo={advisorInfo}
+        onLogout={logout}
       />
       <div className="main">
         <header className="topbar">
