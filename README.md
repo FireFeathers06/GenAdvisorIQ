@@ -37,11 +37,22 @@ Create `.env` at the repo root:
 CLAUDE_API_KEY=your_anthropic_api_key
 MONGODB_URL=mongodb://localhost:27017
 MONGODB_DATABASE=genaibot
+JWT_SECRET_KEY=<openssl rand -base64 48>   # sessions reset on restart if omitted
 
 # Optional
-CLAUDE_MODEL=claude-3-sonnet-20240229
+CLAUDE_MODEL=claude-sonnet-4-6
 CLAUDE_MAX_TOKENS=2000
 CLAUDE_TEMPERATURE=0.7
+CHAT_DAILY_TOKEN_BUDGET=200000   # per-advisor daily AI token budget
+CHAT_MAX_OUTPUT_TOKENS=1500      # server-side cap per chat request
+CORS_ALLOWED_ORIGINS=            # comma-separated; empty = same-origin only
+ALLOWED_HOSTS=*                  # comma-separated for host header validation
+```
+
+### 2b. Create advisor credentials
+Authentication runs against the `agents` collection. Set a password for an agent:
+```bash
+python scripts/set_advisor_password.py <username-or-email> <password>
 ```
 
 ### 3. Run the server
@@ -136,6 +147,26 @@ app/static/                        # React SPA (no build step)
 ├── charts.jsx                     # Recharts wrappers (AreaTrend, etc.)
 └── tweaks-panel.jsx               # Dev theme / layout tweaks panel
 ```
+
+## Authentication (Phase 2)
+
+All `/api/v1/*` endpoints require a bearer token except the `auth` routes.
+
+| Endpoint | Purpose |
+|----------|---------|
+| `POST /api/v1/auth/login` | `{username, password}` → access token (30 min) + httpOnly refresh cookie (7 days) |
+| `POST /api/v1/auth/refresh` | Exchange the refresh cookie for a new access token (rotates the cookie) |
+| `POST /api/v1/auth/logout` | Clear the refresh cookie |
+| `GET /api/v1/auth/me` | Current advisor profile |
+
+Send the token as `Authorization: Bearer <access_token>`. The SPA handles this automatically (login screen, in-memory token, transparent refresh on 401).
+
+**Data scoping:** every endpoint filters by the authenticated advisor's `AgentId` — an advisor can only see and query their own book. Cross-book customer lookups return 404.
+
+**Guardrails:**
+- Chat proxy: per-advisor daily token budget (429 when exhausted), server-side `max_tokens` cap, payload size/turn limits
+- Rate limits: 120 req/min per IP globally, 5/min on login, 20/min on chat
+- Security headers on all responses; CSP on the SPA; optional `ALLOWED_HOSTS` and CORS allowlist via env
 
 ## API Reference
 

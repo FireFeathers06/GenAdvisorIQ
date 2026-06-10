@@ -2,13 +2,21 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.middleware.trustedhost import TrustedHostMiddleware
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from app.core.config import settings
+from app.core.ratelimit import limiter
 from app.api.v1.insights import router as insights_router
 from app.api.v1.admin import router as admin_router
 from app.api.v1.chat import router as chat_router
 from app.api.v1.advisor import router as advisor_router
+from app.api.v1.auth import router as auth_router
 from app.core.database import mongodb
 from app.services.summary_service import refresh_all_summaries
 import structlog
@@ -107,8 +115,52 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-app.add_middleware(RequestLoggingMiddleware)
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        if request.url.path.startswith("/ui"):
+            # unsafe-eval is required by Babel standalone (removed in Phase 5's
+            # Vite build); connect-src 'self' still blocks data exfiltration.
+            response.headers["Content-Security-Policy"] = (
+                "default-src 'self'; "
+                "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://unpkg.com https://cdn.jsdelivr.net; "
+                "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+                "font-src https://fonts.gstatic.com; "
+                "img-src 'self' data:; "
+                "connect-src 'self'"
+            )
+        return response
 
+
+app.add_middleware(RequestLoggingMiddleware)
+app.add_middleware(SecurityHeadersMiddleware)
+
+# Rate limiting — default 120 req/min per IP; stricter limits on login and chat
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_middleware(SlowAPIMiddleware)
+
+# Host header validation (set ALLOWED_HOSTS in .env for production)
+_hosts = [h.strip() for h in settings.allowed_hosts.split(",") if h.strip()]
+if _hosts and _hosts != ["*"]:
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=_hosts)
+
+# CORS — only enabled when an explicit allowlist is configured; the SPA is
+# served same-origin and needs no CORS by default
+_origins = [o.strip() for o in settings.cors_allowed_origins.split(",") if o.strip()]
+if _origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_origins,
+        allow_credentials=True,
+        allow_methods=["GET", "POST"],
+        allow_headers=["Authorization", "Content-Type"],
+    )
+
+app.include_router(auth_router, prefix="/api/v1")
 app.include_router(insights_router, prefix="/api/v1")
 app.include_router(admin_router, prefix="/api/v1")
 app.include_router(chat_router, prefix="/api/v1")

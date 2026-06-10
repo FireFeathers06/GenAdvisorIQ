@@ -379,6 +379,28 @@ html, body {
 .msg .m-ava { width: 26px; height: 26px; border-radius: 8px; flex: none; display: grid; place-items: center; }
 .msg.ai .m-ava { background: var(--accent-soft); color: var(--ink); }
 
+/* Login screen */
+.login-screen {
+  display: flex; align-items: center; justify-content: center;
+  height: 100vh; background: var(--bg);
+}
+.login-card { width: 340px; padding: 28px; }
+.login-label {
+  display: block; font-size: 11px; font-weight: 600; letter-spacing: .04em;
+  text-transform: uppercase; color: var(--ink-3); margin: 12px 0 6px;
+}
+.login-input {
+  width: 100%; box-sizing: border-box; padding: 9px 12px;
+  font-family: var(--font-ui); font-size: 13.5px; color: var(--ink);
+  background: var(--panel-3); border: 1px solid var(--line); border-radius: 9px;
+  outline: none; transition: border-color .14s;
+}
+.login-input:focus { border-color: var(--accent); }
+.login-error {
+  display: flex; align-items: center; gap: 6px; margin-top: 12px;
+  font-size: 12.5px; color: var(--neg);
+}
+
 /* Markdown output — used in chat bubbles, briefing bands, summary cards */
 .md-body { }
 .md-body p { margin: 0 0 6px; }

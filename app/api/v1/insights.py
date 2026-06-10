@@ -1,9 +1,10 @@
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from app.models.query import QueryRequest
 from app.models.api import success_response, error_response
+from app.core.auth import get_current_advisor
 from app.services.query_service import process_query
 from app.services.database_service import DatabaseService
-from app.models.database import ApiUsage
+from app.models.database import Agent, ApiUsage
 from bson.errors import InvalidId
 from bson import ObjectId
 from datetime import datetime
@@ -16,7 +17,8 @@ router = APIRouter(prefix="/insights", tags=["AI Insights"])
 
 
 @router.post("/ask", summary="Get personalized financial advice")
-async def ask(query: QueryRequest, request: Request):
+async def ask(query: QueryRequest, request: Request,
+              advisor: Agent = Depends(get_current_advisor)):
     request_id: str = getattr(request.state, "request_id", None)
     start_time = time.time()
     status_code = 200
@@ -29,7 +31,7 @@ async def ask(query: QueryRequest, request: Request):
             raise HTTPException(status_code=400, detail="Invalid customer ID format")
 
         customer = await DatabaseService.get_customer(query.customer_id)
-        if not customer:
+        if not customer or str(customer.agent_id) != str(advisor.id):
             status_code = 404
             raise HTTPException(status_code=404, detail=f"Customer {query.customer_id} not found")
 
