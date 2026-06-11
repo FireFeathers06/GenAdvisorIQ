@@ -1,9 +1,11 @@
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from app.models.api import success_response, error_response
 from app.core.auth import get_current_advisor
+from app.core.config import settings
 from app.core.database import mongodb
 from app.services.database_service import DatabaseService
 from app.services.llm_service import CLAUDE_PRICING
+from app.services.usage_service import advisor_usage_rollup
 from app.services.summary_service import refresh_customer_summary, refresh_all_summaries
 from app.models.database import Agent, ApiUsage
 from bson.errors import InvalidId
@@ -82,20 +84,30 @@ async def get_customer_profile(customer_id: str, request: Request,
 
 
 @router.get("/usage", summary="API usage statistics")
-async def get_usage_stats(request: Request):
+async def get_usage_stats(request: Request,
+                          advisor: Agent = Depends(get_current_advisor)):
     request_id: str = getattr(request.state, "request_id", None)
     try:
         stats = await DatabaseService.get_usage_stats()
+        rollup = await advisor_usage_rollup(str(advisor.id), days=14)
+        rollup["budget"] = {
+            "daily_limit": settings.chat_daily_token_budget,
+            "used_today": rollup["today"]["tokens"],
+        }
         return success_response({
-            "total": {
-                "requests": stats.get("total_requests", 0),
-                "tokens": stats.get("total_tokens", 0),
-                "cost_usd": round(stats.get("total_cost", 0.0), 4),
-            },
-            "today": {
-                "requests": stats.get("requests_today", 0),
-                "tokens": stats.get("tokens_today", 0),
-                "cost_usd": round(stats.get("cost_today", 0.0), 4),
+            "advisor": rollup,
+            "model": settings.claude_model,
+            "platform": {
+                "total": {
+                    "requests": stats.get("total_requests", 0),
+                    "tokens": stats.get("total_tokens", 0),
+                    "cost_usd": round(stats.get("total_cost", 0.0), 4),
+                },
+                "today": {
+                    "requests": stats.get("requests_today", 0),
+                    "tokens": stats.get("tokens_today", 0),
+                    "cost_usd": round(stats.get("cost_today", 0.0), 4),
+                },
             },
             "pricing": CLAUDE_PRICING,
         }, request_id=request_id)

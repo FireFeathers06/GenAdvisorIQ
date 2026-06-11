@@ -28,6 +28,8 @@ function AdvisorCopilot({ focusClient, pendingAsk, onConsumeAsk }) {
   const [msgs, setMsgs] = React.useState([{ role: "assistant", content: greeting }]);
   const [input, setInput] = React.useState("");
   const [busy, setBusy] = React.useState(false);
+  const [toolNote, setToolNote] = React.useState(null);
+  const [budget, setBudget] = React.useState(window._aiBudget || null);
   const streamRef = React.useRef(null);
   const taRef = React.useRef(null);
   const suggestions = focusClient ? COPILOT_SUGGEST_CLIENT(focusClient) : COPILOT_SUGGEST_BOOK;
@@ -48,13 +50,42 @@ function AdvisorCopilot({ focusClient, pendingAsk, onConsumeAsk }) {
     const next = [...msgs, { role: "user", content: q }];
     setMsgs(next);
     setBusy(true);
+    setToolNote(null);
     scrollDown();
+
+    // Stream the reply: append an assistant bubble on the first token, then
+    // grow it in place. Tool events surface as a status line while we wait.
+    let streaming = false;
     const reply = await askCopilot(
       next.map((m) => ({ role: m.role === "assistant" ? "assistant" : "user", content: m.content })),
-      focusClient
+      focusClient,
+      {
+        onText: (delta, full) => {
+          setToolNote(null);
+          if (!streaming) {
+            streaming = true;
+            setMsgs((m) => [...m, { role: "assistant", content: full }]);
+          } else {
+            setMsgs((m) => {
+              const copy = [...m];
+              copy[copy.length - 1] = { ...copy[copy.length - 1], content: full };
+              return copy;
+            });
+          }
+          scrollDown();
+        },
+        onTool: (ev) => { setToolNote(ev.label || "Fetching data…"); scrollDown(); },
+      }
     );
-    setMsgs((m) => [...m, { role: "assistant", content: reply }]);
+    setMsgs((m) => {
+      const copy = [...m];
+      if (streaming) copy[copy.length - 1] = { role: "assistant", content: reply };
+      else copy.push({ role: "assistant", content: reply });
+      return copy;
+    });
+    setBudget(window._aiBudget || null);
     setBusy(false);
+    setToolNote(null);
     scrollDown();
   };
 
@@ -72,7 +103,10 @@ function AdvisorCopilot({ focusClient, pendingAsk, onConsumeAsk }) {
         <span className="ai-orb"><Icon name="sparkle" size={17} /></span>
         <div style={{ flex: 1 }}>
           <div className="t">Copilot{focusClient ? " · " + focusClient.name.split(" ")[0] : ""}</div>
-          <div className="s"><span className="live-dot" /> Book-aware · powered by Claude</div>
+          <div className="s">
+            <span className="live-dot" /> Book-aware · powered by Claude
+            {budget && budget.daily_limit ? ` · ${Math.min(100, Math.round(budget.used_today / budget.daily_limit * 100))}% budget used` : ""}
+          </div>
         </div>
         <button className="icon-btn" style={{ width: 30, height: 30 }}
                 onClick={() => setMsgs([{ role: "assistant", content: greeting }])} title="Reset">
@@ -88,10 +122,16 @@ function AdvisorCopilot({ focusClient, pendingAsk, onConsumeAsk }) {
             </div>
           </div>
         ))}
-        {busy && (
+        {busy && (toolNote || msgs[msgs.length - 1].role === "user") && (
           <div className="msg ai">
             <span className="m-ava"><Icon name="sparkle" size={14} /></span>
-            <div className="bub"><span className="typing"><i /><i /><i /></span></div>
+            <div className="bub">
+              {toolNote
+                ? <span className="row" style={{ gap: 8, fontSize: 12, color: "var(--ink-2)" }}>
+                    <span className="typing" style={{ transform: "scale(.85)" }}><i /><i /><i /></span> {toolNote}
+                  </span>
+                : <span className="typing"><i /><i /><i /></span>}
+            </div>
           </div>
         )}
         {msgs.length <= 1 && !busy && (
@@ -128,9 +168,15 @@ function BookBriefing({ clients, ask }) {
     (async () => {
       try {
         if (top.length > 0) {
-          const prompt = `Write a 2-3 sentence punchy morning briefing for a wealth advisor about their book. Priorities: ${top.map((c) => `${c.name} — ${c.action}, last contacted ${c.lastContact} days ago${c.summary ? ". Context: " + c.summary.slice(0, 100) : ""}`).join(" | ")}. End with the single highest-value action. Plain text, no greeting line, no markdown.`;
-          const r = await window.claude.complete({ messages: [{ role: "user", content: prompt }] });
-          if (alive && r && r.length > 20) setText(r.trim());
+          // Server-side grounding: the backend already has the full book
+          // snapshot, so the prompt carries only the instruction.
+          const prompt = "Write a 2-3 sentence punchy morning briefing about my book. Lead with the relationships that need attention today and end with the single highest-value action. Plain text, no greeting line, no markdown headers.";
+          const r = await window.claude.stream({
+            messages: [{ role: "user", content: prompt }],
+            scope: "book",
+            onText: (delta, full) => { if (alive && full.length > 20) { setText(full.trim()); setLoading(false); } },
+          });
+          if (alive && r.content && r.content.length > 20) setText(r.content.trim());
         }
       } catch (e) {}
       if (alive) setLoading(false);

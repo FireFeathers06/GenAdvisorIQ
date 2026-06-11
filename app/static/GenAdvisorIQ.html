@@ -61,6 +61,45 @@ window.claude = {
     if (!resp.ok) throw new Error('GenAdvisorIQ API error ' + resp.status);
     const data = await resp.json();
     return data.content;
+  },
+
+  /* Grounded copilot stream (SSE). The server holds all context — we send only
+     the conversation + scope ("book" or "client:<id>"). Callbacks:
+     onText(delta, fullSoFar), onTool({name, label}). Resolves to
+     { content, usage, budget }. */
+  async stream({ messages, scope = 'book', onText, onTool }) {
+    const resp = await window.authFetch('/api/v1/copilot/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages, scope })
+    });
+    if (resp.status === 429) throw new Error('Daily AI budget exhausted or rate limited');
+    if (!resp.ok) throw new Error('GenAdvisorIQ API error ' + resp.status);
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '', full = '', usage = null, budget = null;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf('\n\n')) !== -1) {
+        const chunk = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        for (const line of chunk.split('\n')) {
+          if (!line.startsWith('data: ')) continue;
+          let ev;
+          try { ev = JSON.parse(line.slice(6)); } catch (e) { continue; }
+          if (ev.type === 'text') { full += ev.text; onText && onText(ev.text, full); }
+          else if (ev.type === 'tool') { onTool && onTool(ev); }
+          else if (ev.type === 'done') { usage = ev.usage; budget = ev.budget; }
+          else if (ev.type === 'error') { throw new Error(ev.message); }
+        }
+      }
+    }
+    if (budget) window._aiBudget = budget;
+    return { content: full, usage, budget };
   }
 };
 </script>
@@ -77,6 +116,7 @@ window.claude = {
 <script type="text/babel" src="cards.jsx"></script>
 <script type="text/babel" src="companion.jsx"></script>
 <script type="text/babel" src="book.jsx"></script>
+<script type="text/babel" src="reports.jsx"></script>
 
 <script type="text/babel">
 const { useState, useEffect, useRef } = React;
@@ -496,6 +536,8 @@ function App() {
             </div>
           ) : active === "opportunities" ? (
             <OpportunitiesView clients={clientsList} onOpen={openClient} ask={ask} />
+          ) : active === "reports" ? (
+            <ReportsView />
           ) : active === "copilot" ? (
             <div style={{ height: "100%", maxWidth: 880, margin: "0 auto" }}>
               <AdvisorCopilot pendingAsk={copilotAsk._pending} onConsumeAsk={copilotAsk._consume} />

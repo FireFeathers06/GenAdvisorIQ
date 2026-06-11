@@ -15,6 +15,7 @@ from app.core.ratelimit import limiter
 from app.api.v1.insights import router as insights_router
 from app.api.v1.admin import router as admin_router
 from app.api.v1.chat import router as chat_router
+from app.api.v1.copilot import router as copilot_router
 from app.api.v1.advisor import router as advisor_router
 from app.api.v1.auth import router as auth_router
 from app.core.database import mongodb
@@ -164,6 +165,7 @@ app.include_router(auth_router, prefix="/api/v1")
 app.include_router(insights_router, prefix="/api/v1")
 app.include_router(admin_router, prefix="/api/v1")
 app.include_router(chat_router, prefix="/api/v1")
+app.include_router(copilot_router, prefix="/api/v1")
 app.include_router(advisor_router, prefix="/api/v1")
 
 _static_dir = os.path.join(os.path.dirname(__file__), "static")
@@ -179,6 +181,7 @@ def read_root():
         "endpoints": {
             "ask": "POST /api/v1/insights/ask",
             "chat": "POST /api/v1/chat/complete",
+            "copilot": "POST /api/v1/copilot/ask (SSE)",
             "customer": "GET /api/v1/admin/customers/{customer_id}",
             "usage": "GET /api/v1/admin/usage",
             "health": "GET /api/v1/admin/health",

@@ -5,12 +5,13 @@ A FastAPI backend and React SPA for wealth management advisors. Advisors get a f
 ## Features
 
 - **Advisor dashboard** — book-of-business in worklist, table, and card layouts; client detail view with financial cards
-- **AI Copilot** — book-aware and client-aware Claude chat rail; AI briefing band on every view
+- **AI Copilot (grounded, streaming)** — server-side grounding with a cached book snapshot plus drill-down tools: Claude fetches a client's full financials or call history from MongoDB on demand, scoped to the signed-in advisor. Responses stream token-by-token over SSE with live "Looking up…" tool status
 - **Health scoring** — 5-factor score (savings rate, debt ratio, goal progress, insurance, emergency fund) computed server-side per client
 - **Full MongoDB integration** — customers, assets, liabilities, insurance, goals, call logs; no hardcoded data anywhere in the UI
-- **Secure AI proxy** — `POST /api/v1/chat/complete` keeps the Anthropic API key server-side; the browser never sees it
+- **Secure AI proxy** — all Claude calls go through the FastAPI backend; the browser never sees the Anthropic API key
 - **Markdown rendering** — all Claude responses render formatted (bold, bullets, headings) in chat bubbles and summary cards
-- **Usage analytics** — per-request token and cost tracking logged to `api_usage` collection
+- **Usage & budget dashboard** — Reports screen shows per-advisor tokens, spend, daily budget bar, 14-day trend, and per-feature breakdown
+- **Structured outputs** — `/api/analyze` advice is schema-enforced JSON via the Claude structured-outputs API (no fragile response parsing)
 
 ## Technology Stack
 
@@ -85,11 +86,24 @@ Interactive API docs available at `http://localhost:8000/docs`.
 ## Architecture
 
 ```
-POST /api/analyze          →  app/api/routes.py  →  query_service  →  MongoDB + Claude
+POST /api/analyze          →  app/api/routes.py  →  query_service  →  MongoDB + Claude (structured outputs)
 GET  /api/v1/advisor/book  →  app/api/v1/advisor.py  (batch-fetch + health score)
-POST /api/v1/chat/complete →  app/api/v1/chat.py     (Claude proxy)
+POST /api/v1/copilot/ask   →  app/api/v1/copilot.py  (grounded SSE chat + tool loop)
+POST /api/v1/chat/complete →  app/api/v1/chat.py     (plain Claude proxy, legacy)
+GET  /api/v1/admin/usage   →  app/api/v1/admin.py    (per-advisor usage rollups)
 GET  /ui/*                 →  app/static/            (React SPA)
 ```
+
+### Request flow — `POST /api/v1/copilot/ask` (Phase 3)
+The browser sends only the conversation and a scope (`book` or `client:{id}`); all grounding happens server-side:
+1. Build a **book snapshot** — one compact line per client (name, id, segment, AUM, health score, last contact, sentiment, next action) — and send it as the system prompt with `cache_control: ephemeral` so later turns hit the prompt cache
+2. Claude answers broad questions straight from the snapshot; for specifics it calls **drill-down tools**:
+   - `get_client_details(client_id)` — demographics, financials, assets, liabilities, insurance, goals, dependents
+   - `get_call_history(client_id, limit)` — call dates, purpose, sentiment, feedback, notes
+3. Every tool query is filtered by the authenticated advisor's `AgentId` — a prompt-injected request for another advisor's client returns `not found`
+4. Text deltas, tool-status events, and a final usage/budget event stream back over SSE; usage (incl. cache tokens) is logged to `api_usage`
+
+> Prompt-cache hits are best-effort: with global inference routing, consecutive requests can land in different regions, each with its own cache. Cache reads/writes are tracked in the cost calculation either way.
 
 ### Request flow — `/api/v1/advisor/book`
 1. Fetch all customers from MongoDB
@@ -100,7 +114,7 @@ GET  /ui/*                 →  app/static/            (React SPA)
 ### Request flow — `/ui/GenAdvisorIQ.html`
 1. On mount: `GET /api/v1/advisor/book` → populates worklist and KPI tiles
 2. On client click: `GET /api/v1/admin/customers/{id}` → builds full persona via `buildPersonaFromContext()`
-3. All AI calls: `POST /api/v1/chat/complete` → Claude API (key never in browser)
+3. Copilot & briefing: `POST /api/v1/copilot/ask` (SSE) via `window.claude.stream()` — the browser sends only messages + scope; context is built server-side (key never in browser)
 
 ### Health score factors
 
@@ -122,11 +136,14 @@ app/
 │   └── v1/
 │       ├── admin.py               # GET /api/v1/admin/customers/{id}, usage, health
 │       ├── advisor.py             # GET /api/v1/advisor/book
-│       ├── chat.py                # POST /api/v1/chat/complete (Claude proxy)
+│       ├── chat.py                # POST /api/v1/chat/complete (plain proxy, legacy)
+│       ├── copilot.py             # POST /api/v1/copilot/ask (grounded SSE + tools)
 │       └── insights.py           # POST /api/v1/insights/ask
 ├── services/
-│   ├── llm_service.py             # AsyncAnthropic wrapper + cost metrics
-│   ├── query_service.py           # Prompt building + Claude call for /api/analyze
+│   ├── llm_service.py             # AsyncAnthropic wrapper + pricing/cost metrics
+│   ├── copilot_service.py         # Book snapshot, drill-down tools, ownership gate
+│   ├── usage_service.py           # Token budget + per-advisor usage rollups
+│   ├── query_service.py           # Prompt + JSON schema for /api/analyze
 │   ├── database_service.py        # MongoDB queries for /api/analyze context
 │   └── summary_service.py         # Background summary refresh scheduler
 ├── models/
@@ -141,10 +158,11 @@ app/static/                        # React SPA (no build step)
 ├── styles.css                     # Design tokens + component styles
 ├── data.jsx                       # buildPersonaFromContext(), Markdown renderer
 ├── advisor-data.jsx               # askCopilot() grounded in live book context
-├── book.jsx                       # BookView, AdvisorCopilot, ClientDetail
+├── book.jsx                       # BookView, AdvisorCopilot (streaming), ClientDetail
 ├── cards.jsx                      # Financial cards (NetWorth, Health, Goals, …)
 ├── companion.jsx                  # AICompanion, AIBriefing, ExplainModal
-├── charts.jsx                     # Recharts wrappers (AreaTrend, etc.)
+├── charts.jsx                     # SVG chart components (AreaTrend, Donut, …)
+├── reports.jsx                    # ReportsView — AI usage & budget dashboard
 └── tweaks-panel.jsx               # Dev theme / layout tweaks panel
 ```
 
@@ -164,8 +182,9 @@ Send the token as `Authorization: Bearer <access_token>`. The SPA handles this a
 **Data scoping:** every endpoint filters by the authenticated advisor's `AgentId` — an advisor can only see and query their own book. Cross-book customer lookups return 404.
 
 **Guardrails:**
-- Chat proxy: per-advisor daily token budget (429 when exhausted), server-side `max_tokens` cap, payload size/turn limits
-- Rate limits: 120 req/min per IP globally, 5/min on login, 20/min on chat
+- Copilot & chat proxy: shared per-advisor daily token budget across both endpoints (429 when exhausted), server-side `max_tokens` cap, payload size/turn limits
+- Copilot tools only query the authenticated advisor's book — prompt injection cannot reach another book's data
+- Rate limits: 120 req/min per IP globally, 5/min on login, 20/min on copilot and chat
 - Security headers on all responses; CSP on the SPA; optional `ALLOWED_HOSTS` and CORS allowlist via env
 
 ## API Reference
@@ -196,8 +215,25 @@ Returns the advisor's full book of business with pre-computed display fields.
 }
 ```
 
+### `POST /api/v1/copilot/ask`
+Grounded copilot chat. Streams Server-Sent Events; context (book snapshot + tools) is assembled server-side.
+
+**Request:**
+```json
+{ "messages": [{ "role": "user", "content": "Does Allen have life insurance?" }], "scope": "book" }
+```
+`scope` is `"book"` or `"client:<customer_id>"` (adds a client-focus note for the model).
+
+**SSE events:**
+```
+data: {"type": "text", "text": "Allen currently has"}
+data: {"type": "tool", "name": "get_client_details", "label": "Looking up Allen Brown's financial details…"}
+data: {"type": "done", "usage": {"input_tokens": 1720, "output_tokens": 233, "cache_read_tokens": 0, "cache_write_tokens": 1253, "cost_usd": 0.0134}, "budget": {"daily_limit": 200000, "used_today": 4521}}
+data: {"type": "error", "message": "…"}   // only on failure
+```
+
 ### `POST /api/v1/chat/complete`
-Proxies a message to Claude. Never call Anthropic directly from the browser.
+Plain (non-grounded) Claude proxy, kept for one-shot prompts. Never call Anthropic directly from the browser.
 
 **Request:**
 ```json
@@ -216,15 +252,15 @@ Full client context including assets, liabilities, goals, insurance, recent call
 Legacy endpoint — personalized financial advice for a single customer question.
 
 ### `GET /api/v1/admin/usage`
-Aggregate token and cost statistics from the `api_usage` collection.
+Per-advisor AI usage rollups (today / all-time totals, per-endpoint breakdown, 14-day daily series, budget status) plus platform-wide totals and the active pricing table. Backs the Reports screen.
 
 ## Development Notes
 
 **Pydantic aliases:** MongoDB documents use PascalCase and spaced field names (`FirstName`, `Marital Status`). All models in `app/models/database.py` use `Field(alias="...")` with `populate_by_name=True`.
 
-**Claude model:** Configured via `CLAUDE_MODEL` env var. If you change the model, also update `CLAUDE_PRICING` in `app/services/llm_service.py` to keep cost calculations accurate.
+**Claude model:** Configured via `CLAUDE_MODEL` env var (default `claude-sonnet-4-6`). If you change the model, also add its rates to `CLAUDE_PRICING` in `app/services/llm_service.py` — unknown models log a warning and flag their cost metrics with `"estimated": true` rather than failing silently.
 
-**Frontend globals:** `book.jsx` sets `window._bookClients`, `window._advisorInfo`, `window._bookKpis` after the book fetch so `askCopilot()` in `advisor-data.jsx` can build a grounded context string without prop-drilling.
+**Frontend globals:** the app shell sets `window._bookClients`, `window._advisorInfo`, `window._bookKpis` after the book fetch (used for offline fallbacks and KPI tiles); `window._aiBudget` is updated from each copilot `done` event. Copilot context itself is built server-side — `askCopilot()` just streams `messages + scope`.
 
 **Markdown in chat:** The `Markdown` component in `data.jsx` uses `marked` (loaded via CDN) to render Claude responses. It is applied to all AI output surfaces — chat bubbles, briefing bands, and summary cards. Worklist snippets strip markdown before truncating to avoid orphaned `**` tokens.
 
