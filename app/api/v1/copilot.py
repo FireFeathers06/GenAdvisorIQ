@@ -23,12 +23,14 @@ from app.core.ratelimit import limiter
 from app.models.database import Agent, ApiUsage
 from app.services.copilot_service import (
     COPILOT_TOOLS,
+    _owned_customer,
     build_system_blocks,
     run_copilot_tool,
     tool_status_label,
 )
 from app.services.database_service import DatabaseService
 from app.services.llm_service import calculate_cost
+from app.services.signal_service import client_suggestions
 from app.services.usage_service import tokens_used_today
 import structlog
 
@@ -69,6 +71,18 @@ def _validate(req: CopilotAskRequest):
 
 def _sse(payload: dict) -> str:
     return f"data: {json.dumps(payload)}\n\n"
+
+
+@router.get("/suggestions/{client_id}", summary="Signal-driven copilot suggestions for a client")
+async def get_suggestions(
+    client_id: str,
+    request: Request,
+    advisor: Agent = Depends(get_current_advisor),
+):
+    # Same ownership gate as the tools — suggestions leak client data otherwise.
+    if not await _owned_customer(str(advisor.id), client_id):
+        raise HTTPException(status_code=404, detail="Client not found")
+    return {"suggestions": await client_suggestions(client_id)}
 
 
 @router.post("/ask", summary="Grounded copilot chat (SSE stream)")

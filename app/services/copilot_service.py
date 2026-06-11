@@ -83,6 +83,19 @@ async def _fetch_client_records(advisor: Agent) -> List[dict]:
     return records
 
 
+async def _fetch_product_shelf() -> str:
+    """The firm's product catalog (bankProducts) as compact prompt lines."""
+    db = mongodb.get_db()
+    lines = []
+    async for doc in db["bankProducts"].find():
+        ptype = str(doc.get("Product Type", "")).strip()
+        pname = str(doc.get("Product Name", "")).strip()
+        pcat = str(doc.get("Product Category", "") or doc.get("Product Scope", "")).strip()
+        if pname:
+            lines.append(f"- {pname} ({ptype}{', ' + pcat if pcat else ''})")
+    return "\n".join(lines)
+
+
 def _snapshot_line(r: dict) -> str:
     contact = "never contacted" if r["lastContact"] >= 999 else f"last contact {r['lastContact']}d ago"
     risk = ", AT RISK" if r["flag"] else ""
@@ -98,6 +111,7 @@ async def build_system_blocks(advisor: Agent, scope: Optional[str] = None) -> tu
     """System prompt blocks ([cached book snapshot, optional uncached client-focus
     note]) plus a {client_id: name} map for UI status labels."""
     records = await _fetch_client_records(advisor)
+    product_shelf = await _fetch_product_shelf()
     advisor_name = f"{advisor.first_name} {advisor.last_name}".strip() or "the advisor"
     company = advisor.company or "GenAdvisorIQ"
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -112,11 +126,15 @@ async def build_system_blocks(advisor: Agent, scope: Optional[str] = None) -> tu
 BOOK SNAPSHOT ({len(records)} clients, {_fmt_usd(total_aum)} total AUM, {at_risk} at risk):
 {lines}
 
-TOOLS: The snapshot is a summary. When a question needs specifics — assets, liabilities, income, insurance coverage, goal amounts, demographics, or what was discussed on past calls — call get_client_details or get_call_history with the client id shown in brackets. Never guess or invent numbers the snapshot doesn't contain.
+PRODUCT SHELF (the only products you may recommend):
+{product_shelf or "(no catalog available)"}
+
+TOOLS: The snapshot is a summary. When a question needs specifics — assets, liabilities, income, insurance coverage, goal amounts, transactions, demographics, or what was discussed on past calls — call get_client_details or get_call_history with the client id shown in brackets. Never guess or invent numbers the snapshot doesn't contain.
 
 RULES:
 - Be concise and action-oriented (2-4 sentences unless asked to draft something). Talk like a sharp practice-management coach.
 - Reference SPECIFIC client names and dollar figures from the snapshot or tool results.
+- When a conversation opens a product opportunity, recommend the most relevant product(s) from the PRODUCT SHELF by name with a one-line reason grounded in the client's data. Never recommend a product that isn't on the shelf, and never pitch when it doesn't genuinely fit.
 - If asked to draft an email or call script, write it ready-to-send.
 - If a tool returns "not found", that client is not in this advisor's book — say so plainly.
 - Never invent compliance-sensitive claims or guarantee returns.
@@ -133,11 +151,18 @@ RULES:
         cid = scope.split(":", 1)[1]
         rec = next((r for r in records if r["id"] == cid), None)
         if rec:
+            from app.services.signal_service import compute_client_signals, signals_summary_text
+            try:
+                signals = await compute_client_signals(cid)
+            except Exception as e:
+                logger.warning("copilot_signals_error", customer_id=cid, error=str(e))
+                signals = []
             blocks.append({
                 "type": "text",
                 "text": (
                     f"The advisor is currently viewing {rec['name']} [id {rec['id']}]. "
                     f"Questions about 'this client' refer to them."
+                    + signals_summary_text(signals)
                 ),
             })
     return blocks, {r["id"]: r["name"] for r in records}
@@ -152,8 +177,9 @@ COPILOT_TOOLS: List[Dict[str, Any]] = [
         "name": "get_client_details",
         "description": (
             "Full financial profile for one client in the advisor's book: demographics, "
-            "income and expenses, every asset, liability, insurance policy, goal, and "
-            "dependents. Use when a question needs specifics beyond the book snapshot."
+            "income and expenses, every asset, liability, insurance policy, goal, "
+            "dependents, and recent out-of-pocket transactions. Use when a question "
+            "needs specifics beyond the book snapshot."
         ),
         "input_schema": {
             "type": "object",
@@ -257,6 +283,11 @@ async def _get_client_details(advisor_id: str, tool_input: dict) -> str:
             {"name": f"{d.get('first_name', '')} {d.get('last_name', '')}".strip(),
              "relation": d.get("relation"), "dob": d.get("dob")}
             for d in ctx.get("dependents", [])
+        ],
+        "recent_transactions": [
+            {"date": t.get("transaction_date"), "amount": t.get("amount"),
+             "description": t.get("description"), "recurring": t.get("recurring_status")}
+            for t in ctx.get("recent_transactions", [])
         ],
         "advisor_summary": customer.get("summary"),
     }

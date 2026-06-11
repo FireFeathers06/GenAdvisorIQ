@@ -30,9 +30,30 @@ function AdvisorCopilot({ focusClient, pendingAsk, onConsumeAsk }) {
   const [busy, setBusy] = React.useState(false);
   const [toolNote, setToolNote] = React.useState(null);
   const [budget, setBudget] = React.useState(window._aiBudget || null);
+  const [clientSuggestions, setClientSuggestions] = React.useState(null);
   const streamRef = React.useRef(null);
   const taRef = React.useRef(null);
-  const suggestions = focusClient ? COPILOT_SUGGEST_CLIENT(focusClient) : COPILOT_SUGGEST_BOOK;
+
+  // Signal-driven suggestions for the focused client (birthday coming up,
+  // uncovered spend, premium due, …) — static chips are the fallback.
+  React.useEffect(() => {
+    setClientSuggestions(null);
+    if (!focusClient) return;
+    let alive = true;
+    (async () => {
+      try {
+        const r = await window.authFetch(`/api/v1/copilot/suggestions/${focusClient.id}`);
+        if (!r.ok) return;
+        const j = await r.json();
+        if (alive && j.suggestions && j.suggestions.length) setClientSuggestions(j.suggestions);
+      } catch (e) {}
+    })();
+    return () => { alive = false; };
+  }, [focusClient && focusClient.id]);
+
+  const suggestions = focusClient
+    ? (clientSuggestions || COPILOT_SUGGEST_CLIENT(focusClient).map(s => ({ label: s, ask: s })))
+    : COPILOT_SUGGEST_BOOK.map(s => ({ label: s, ask: s }));
 
   React.useEffect(() => {
     setMsgs([{ role: "assistant", content: greeting }]);
@@ -42,12 +63,13 @@ function AdvisorCopilot({ focusClient, pendingAsk, onConsumeAsk }) {
     if (streamRef.current) streamRef.current.scrollTop = streamRef.current.scrollHeight;
   });
 
-  const send = async (text) => {
+  const send = async (text, display) => {
     const q = (text ?? input).trim();
     if (!q || busy) return;
     setInput("");
     if (taRef.current) taRef.current.style.height = "auto";
-    const next = [...msgs, { role: "user", content: q }];
+    // display: short chip label shown in the bubble; content: full prompt sent
+    const next = [...msgs, { role: "user", content: q, display }];
     setMsgs(next);
     setBusy(true);
     setToolNote(null);
@@ -118,7 +140,7 @@ function AdvisorCopilot({ focusClient, pendingAsk, onConsumeAsk }) {
           <div key={i} className={"msg " + (m.role === "user" ? "user" : "ai") + " rise"}>
             {m.role !== "user" && <span className="m-ava"><Icon name="sparkle" size={14} /></span>}
             <div className="bub">
-              {m.role === "user" ? m.content : <Markdown content={m.content} />}
+              {m.role === "user" ? (m.display || m.content) : <Markdown content={m.content} />}
             </div>
           </div>
         ))}
@@ -136,7 +158,7 @@ function AdvisorCopilot({ focusClient, pendingAsk, onConsumeAsk }) {
         )}
         {msgs.length <= 1 && !busy && (
           <div className="ai-suggest" style={{ marginTop: 4 }}>
-            {suggestions.map((s) => <button key={s} onClick={() => send(s)}>{s}</button>)}
+            {suggestions.map((s) => <button key={s.label} onClick={() => send(s.ask, s.label)}>{s.label}</button>)}
           </div>
         )}
       </div>
