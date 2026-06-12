@@ -9,11 +9,11 @@ from pydantic import BaseModel
 
 from app.core.auth import get_current_advisor
 from app.core.config import settings
-from app.core.database import mongodb
 from app.core.ratelimit import limiter
 from app.models.database import Agent, ApiUsage
 from app.services.database_service import DatabaseService
 from app.services.llm_service import calculate_cost
+from app.services.usage_service import tokens_used_today
 import structlog
 
 logger = structlog.get_logger()
@@ -28,22 +28,6 @@ class ChatMessage(BaseModel):
 
 class ChatCompleteRequest(BaseModel):
     messages: List[ChatMessage]
-
-
-async def _tokens_used_today(advisor_id: str) -> int:
-    """Sum of chat tokens consumed by this advisor since midnight UTC."""
-    db = mongodb.get_db()
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    pipeline = [
-        {"$match": {
-            "advisor_id": ObjectId(advisor_id),
-            "endpoint": "/api/v1/chat/complete",
-            "timestamp": {"$gte": today},
-        }},
-        {"$group": {"_id": None, "tokens": {"$sum": "$tokens_used"}}},
-    ]
-    result = await db["api_usage"].aggregate(pipeline).to_list(length=1)
-    return int(result[0]["tokens"]) if result else 0
 
 
 def _validate_payload(req: ChatCompleteRequest):
@@ -75,7 +59,7 @@ async def chat_complete(
     _validate_payload(req)
 
     advisor_id = str(advisor.id)
-    used = await _tokens_used_today(advisor_id)
+    used = await tokens_used_today(advisor_id)
     if used >= settings.chat_daily_token_budget:
         logger.warning("chat_budget_exceeded", advisor_id=advisor_id, used=used)
         raise HTTPException(

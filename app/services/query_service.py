@@ -75,8 +75,71 @@ ASSETS ({len(assets)} total):
     return context_prompt
 
 
+# JSON schema enforced via structured outputs (output_config) — the response
+# is guaranteed to match this shape, replacing the old fence-strip-and-pray
+# parsing of a JSON template embedded in the prompt.
+ADVICE_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["analysis", "recommendations", "financial_projections",
+                 "risk_assessment", "next_steps", "follow_up_questions"],
+    "properties": {
+        "analysis": {"type": "string", "description": "Brief summary of the customer's financial situation (max 300 chars)"},
+        "recommendations": {
+            "type": "array",
+            "description": "3-4 recommendations maximum",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["priority", "category", "title", "description",
+                             "action_items", "expected_impact", "timeframe"],
+                "properties": {
+                    "priority": {"type": "string", "enum": ["high", "medium", "low"]},
+                    "category": {"type": "string", "enum": ["savings", "investments", "debt", "insurance", "goals", "retirement"]},
+                    "title": {"type": "string", "description": "Brief title (max 50 chars)"},
+                    "description": {"type": "string", "description": "Detailed explanation (max 200 chars)"},
+                    "action_items": {"type": "array", "items": {"type": "string"}},
+                    "expected_impact": {"type": "string", "description": "Expected financial impact (max 150 chars)"},
+                    "timeframe": {"type": "string", "enum": ["immediate", "short_term", "long_term"]},
+                },
+            },
+        },
+        "financial_projections": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["current_net_worth", "projected_net_worth_1year",
+                         "projected_net_worth_5years", "monthly_savings_potential",
+                         "debt_payoff_timeline", "retirement_readiness"],
+            "properties": {
+                "current_net_worth": {"type": "number"},
+                "projected_net_worth_1year": {"type": "number"},
+                "projected_net_worth_5years": {"type": "number"},
+                "monthly_savings_potential": {"type": "number"},
+                "debt_payoff_timeline": {"type": "string", "description": "Estimated months"},
+                "retirement_readiness": {"type": "string", "description": "Percentage or status"},
+            },
+        },
+        "risk_assessment": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["current_risk_level", "recommended_risk_level",
+                         "risk_concerns", "risk_mitigation"],
+            "properties": {
+                "current_risk_level": {"type": "string", "enum": ["conservative", "moderate", "aggressive"]},
+                "recommended_risk_level": {"type": "string", "enum": ["conservative", "moderate", "aggressive"]},
+                "risk_concerns": {"type": "array", "items": {"type": "string"}, "description": "Max 3 items"},
+                "risk_mitigation": {"type": "array", "items": {"type": "string"}, "description": "Max 3 items"},
+            },
+        },
+        "next_steps": {"type": "array", "items": {"type": "string"}, "description": "Max 3 immediate actions"},
+        "follow_up_questions": {"type": "array", "items": {"type": "string"}, "description": "Max 3 questions"},
+    },
+}
+
+
 def build_prompt(customer_context: str, question: str) -> str:
-    """Build enhanced prompt with customer context and question - requesting structured JSON response"""
+    """Build enhanced prompt with customer context and question. The response
+    shape is enforced separately by ADVICE_SCHEMA (structured outputs)."""
     return f"""You are an expert financial advisor. Use the following customer profile and context to provide personalized, actionable financial advice.
 
 {customer_context}
@@ -84,40 +147,7 @@ def build_prompt(customer_context: str, question: str) -> str:
 CUSTOMER QUESTION:
 {question}
 
-IMPORTANT: Respond with a valid JSON object using this exact structure. Keep descriptions and explanations CONCISE (under 200 characters each) to ensure the response fits within token limits:
-
-{{
-  "analysis": "Brief summary of customer's financial situation (max 300 chars)",
-  "recommendations": [
-    {{
-      "priority": "high|medium|low",
-      "category": "savings|investments|debt|insurance|goals|retirement",
-      "title": "Brief title (max 50 chars)",
-      "description": "Detailed explanation (max 200 chars)",
-      "action_items": ["Specific actionable steps (keep each under 100 chars)"],
-      "expected_impact": "Expected financial impact (max 150 chars)",
-      "timeframe": "immediate|short_term|long_term"
-    }}
-  ],
-  "financial_projections": {{
-    "current_net_worth": <number>,
-    "projected_net_worth_1year": <number>,
-    "projected_net_worth_5years": <number>,
-    "monthly_savings_potential": <number>,
-    "debt_payoff_timeline": "<estimated months>",
-    "retirement_readiness": "<percentage or status>"
-  }},
-  "risk_assessment": {{
-    "current_risk_level": "<conservative|moderate|aggressive>",
-    "recommended_risk_level": "<conservative|moderate|aggressive>",
-    "risk_concerns": ["List of risk factors (max 3 items)"],
-    "risk_mitigation": ["Strategies to address risks (max 3 items)"]
-  }},
-  "next_steps": ["Immediate actions (max 3 items, each under 100 chars)"],
-  "follow_up_questions": ["Questions to ask customer (max 3 items)"]
-}}
-
-CRITICAL: Ensure the ENTIRE response is valid JSON. Limit to 3-4 recommendations maximum. Be specific with numbers and provide actionable advice based on their profile."""
+Keep descriptions and explanations CONCISE (under 200 characters each). Limit to 3-4 recommendations maximum. Be specific with numbers and provide actionable advice based on their profile."""
 
 
 async def process_query(query):
@@ -130,32 +160,10 @@ async def process_query(query):
         context_str = build_financial_context(customer_context)
         prompt = build_prompt(context_str, query.question)
         
-        # Call Claude AI
-        llm_result = await call_llm(prompt)
-        
-        # Parse JSON response from Claude
-        try:
-            raw_response = llm_result["response"]
-            
-            # Remove markdown code blocks if present
-            if raw_response.startswith("```json"):
-                raw_response = raw_response.replace("```json", "").replace("```", "").strip()
-            elif raw_response.startswith("```"):
-                raw_response = raw_response.replace("```", "").strip()
-            
-            structured_response = json.loads(raw_response)
-        except json.JSONDecodeError as e:
-            # Fallback if Claude doesn't return valid JSON
-            structured_response = {
-                "analysis": "Unable to parse structured response",
-                "recommendations": [],
-                "financial_projections": {},
-                "risk_assessment": {},
-                "next_steps": [],
-                "follow_up_questions": [],
-                "raw_response": llm_result["response"],
-                "parse_error": str(e)
-            }
+        # Call Claude AI — structured outputs guarantee the response matches
+        # ADVICE_SCHEMA, so no fence-stripping or parse fallback is needed.
+        llm_result = await call_llm(prompt, output_schema=ADVICE_SCHEMA)
+        structured_response = json.loads(llm_result["response"])
         
         return {
             "structured_advice": structured_response,

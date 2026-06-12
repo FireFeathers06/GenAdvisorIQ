@@ -46,9 +46,11 @@ Phases are ordered by dependency and risk: security gaps first (they block any r
 
 ---
 
-## Phase 3 — AI Layer Upgrade
+## Phase 3 — AI Layer Upgrade ✅ (shipped)
 
 **Goal:** Modern model, streaming UX, correct cost accounting, and server-side grounding.
+
+> **Status:** Implemented. `POST /api/v1/copilot/ask` streams SSE with a server-built cached book snapshot and advisor-scoped drill-down tools (`get_client_details`, `get_call_history`); pricing table corrected with loud unknown-model warnings; `/api/analyze` uses structured outputs (no parse fallback); per-advisor usage rollups power the new Reports screen. Verified: tool answers grounded in real MongoDB data, cross-book tool requests return "not found", budget shared across chat+copilot, cache writes/reads tracked in cost. Note: prompt-cache hits are best-effort under global inference routing (region-local caches).
 
 ### Deliverables
 
@@ -56,9 +58,12 @@ Phases are ordered by dependency and risk: security gaps first (they block any r
    - Change `config.py` default from retired `claude-3-sonnet-20240229` → `claude-sonnet-4-6` (high-volume production default; `claude-opus-4-8` configurable for premium analysis paths)
    - Add current pricing to `CLAUDE_PRICING`: `claude-sonnet-4-6` $3/$15 per MTok, `claude-opus-4-8` $5/$25, `claude-haiku-4-5` $1/$5; remove retired entries
    - Fail loudly (log warning + flagged metric) when the configured model has no pricing entry instead of silently using a default rate
-2. **Streaming chat** — `chat/complete` gains an SSE variant using the SDK's `messages.stream()`; the frontend renders tokens incrementally into the existing copilot bubbles (the `Markdown` component re-renders per chunk)
-3. **Server-side grounding** — move the book/client context assembly from the browser (`askCopilot` building context strings from `window._bookClients`) into the backend. The frontend sends only the user's message + scope (`book` or `client:{id}`); the server builds the prompt from MongoDB. Benefits: no stale client data, smaller payloads, prompt is cacheable
-4. **Prompt caching** — mark the stable system prompt + serialized book context with `cache_control: {type: "ephemeral"}`; rebuild the cached context only when underlying data changes. Copilot conversations hit the cache on every turn (~90% input-cost reduction on repeat turns)
+2. **Streaming chat** — new `POST /api/v1/copilot/ask` streams over SSE using the SDK's `messages.stream()`; the frontend renders tokens incrementally into the existing copilot bubbles (the `Markdown` component re-renders per chunk) and shows tool-activity status events ("Looking up Allen's call history…")
+3. **Server-side grounding (snapshot + tools)** — replace browser-built context strings (`askCopilot` reading `window._bookClients`) with a hybrid retrieval design on the backend:
+   - **Always-on book snapshot** — one compact line per client (name, id, segment, AUM, health score, last contact, sentiment, next action) serialized server-side from MongoDB and sent as the cached system prompt. Answers broad questions ("who haven't I called in 90 days?") in a single turn with no per-client bloat
+   - **Drill-down tools** — Claude requests details only when a question needs them, via advisor-scoped tools: `get_client_details(client_id)` (profile, financials, assets, liabilities, goals, insurance) and `get_call_history(client_id)` (notes, sentiment, purpose). Tools execute server-side with the authenticated advisor's `AgentId` baked into every query — cross-book requests return "not found" no matter what the prompt says
+   - The frontend sends only the message history + scope (`book` or `client:{id}`); fetch-on-demand keeps the prompt small while giving the copilot reach into **all** client data, not the top-6 one-liners it had before
+4. **Prompt caching** — mark the stable system prompt + book snapshot with `cache_control: {type: "ephemeral"}`; tool definitions share the cached prefix. Copilot conversations hit the cache on every turn (~90% input-cost reduction on repeat turns)
 5. **Structured outputs** — replace the fragile "strip markdown fences then `json.loads`" parsing in `query_service.py` with `output_config.format` (JSON schema), eliminating the `parse_error` fallback path
 6. **Usage analytics v2** — per-advisor and per-feature (copilot / briefing / summary) token + cost rollups exposed at `GET /api/v1/admin/usage`
 
@@ -66,6 +71,8 @@ Phases are ordered by dependency and risk: security gaps first (they block any r
 - Copilot responses begin rendering in < 1s (first token)
 - `api_usage` cost figures match Anthropic console billing within rounding
 - Cache read tokens > 0 on second and later copilot turns in a session
+- A question about a client outside the priority top-6 (e.g. insurance coverage, last call notes) is answered from real data via a tool call
+- A prompt-injected request for another advisor's client returns "not found" from the tool layer
 
 ---
 
